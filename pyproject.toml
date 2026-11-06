@@ -8,13 +8,14 @@ version = "0.1.0"
 description = "A local-network Fire TV controller using Android Debug Bridge"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["PySide6>=6.6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
 firestick-controller = "firestick_controller.main:main"
+firestick-controller-gui = "firestick_controller.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

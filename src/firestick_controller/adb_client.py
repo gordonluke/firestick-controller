@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .config import DeviceConfig
+from .config import DeviceConfig, is_valid_package_name
 from .device import DeviceInfo
 
 logger = logging.getLogger(__name__)
+_SAFE_ADB_TEXT = re.compile(r"[A-Za-z0-9 .,_@/+:\-]+\Z")
+
+
+def is_supported_text_input(text: object) -> bool:
+    """Return whether text is supported by Android's ADB input command."""
+    return isinstance(text, str) and bool(text) and _SAFE_ADB_TEXT.fullmatch(text) is not None
 
 
 class AdbError(RuntimeError):
@@ -154,6 +161,52 @@ class AdbClient:
         result = self._run(["disconnect", self.endpoint])
         logger.info("ADB disconnect response: %s", result.stdout or "disconnected")
         return result.stdout
+
+    def input_keyevent(self, keycode: int) -> None:
+        """Send a numeric Android key event to the configured device."""
+        if isinstance(keycode, bool) or not isinstance(keycode, int) or keycode < 0:
+            raise AdbError("ADB keycode must be a non-negative integer")
+        self._run(["-s", self.endpoint, "shell", "input", "keyevent", str(keycode)])
+
+    def input_text(self, text: str) -> None:
+        """Type a restricted set of text characters using Android's input command."""
+        if not is_supported_text_input(text):
+            raise AdbError(
+                "Text input supports letters, numbers, spaces, and . , _ @ / + : - only"
+            )
+        encoded_text = text.replace(" ", "%s")
+        self._run(["-s", self.endpoint, "shell", "input", "text", encoded_text])
+
+    def list_packages(self, include_system: bool = True) -> list[str]:
+        """Return package IDs installed for the active Android user."""
+        arguments = ["-s", self.endpoint, "shell", "pm", "list", "packages"]
+        if not include_system:
+            arguments.append("-3")
+        result = self._run(arguments)
+        packages = {
+            line.removeprefix("package:").strip()
+            for line in result.stdout.splitlines()
+            if line.startswith("package:")
+        }
+        return sorted(packages)
+
+    def launch_package(self, package_name: str, force_stop_first: bool = False) -> str:
+        """Launch an installed package, optionally stopping its current process first."""
+        if not is_valid_package_name(package_name):
+            raise AdbError("Application package name is invalid")
+        if not isinstance(force_stop_first, bool):
+            raise AdbError("force_stop_first must be a boolean")
+        if force_stop_first:
+            logger.info("Force-stopping application package %s before launch", package_name)
+            self._run(["-s", self.endpoint, "shell", "am", "force-stop", package_name])
+        logger.info("Launching application package %s", package_name)
+        result = self._run(
+            ["-s", self.endpoint, "shell", "monkey", "-p", package_name, "1"]
+        )
+        output = result.stdout or result.stderr
+        if "no activities found" in output.lower() or "monkey aborted" in output.lower():
+            raise AdbCommandError(f"No launchable activity found for {package_name}")
+        return output
 
     def _format_endpoint(self, port: int) -> str:
         address = ipaddress.ip_address(self.config.host)

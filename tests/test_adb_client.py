@@ -113,3 +113,102 @@ def test_disconnect_uses_configured_endpoint(client):
     with patch.object(client, "_run", return_value=Mock(stdout="disconnected")) as run:
         assert client.disconnect() == "disconnected"
     run.assert_called_once_with(["disconnect", "192.168.1.25:5555"])
+
+
+def test_input_keyevent_uses_device_keyevent(client):
+    with patch.object(client, "_run") as run:
+        client.input_keyevent(23)
+    run.assert_called_once_with(
+        ["-s", "192.168.1.25:5555", "shell", "input", "keyevent", "23"]
+    )
+
+
+@pytest.mark.parametrize("keycode", [-1, True, "23"])
+def test_input_keyevent_rejects_invalid_keycodes(client, keycode):
+    from firestick_controller.adb_client import AdbError
+
+    with pytest.raises(AdbError, match="keycode"):
+        client.input_keyevent(keycode)
+
+
+def test_input_text_encodes_spaces(client):
+    with patch.object(client, "_run") as run:
+        client.input_text("hello fire tv")
+    run.assert_called_once_with(
+        ["-s", "192.168.1.25:5555", "shell", "input", "text", "hello%sfire%stv"]
+    )
+
+
+@pytest.mark.parametrize("text", ["", "hello; reboot", "two\nlines", "hello%sworld"])
+def test_input_text_rejects_unsupported_characters(client, text):
+    from firestick_controller.adb_client import AdbError
+
+    with pytest.raises(AdbError, match="Text input supports"):
+        client.input_text(text)
+
+
+def test_list_packages_parses_adb_output(client):
+    with patch.object(
+        client,
+        "_run",
+        return_value=Mock(stdout="package:com.netflix.ninja\npackage:com.spotify.tv.android\n"),
+    ) as run:
+        assert client.list_packages() == ["com.netflix.ninja", "com.spotify.tv.android"]
+    run.assert_called_once_with(
+        ["-s", "192.168.1.25:5555", "shell", "pm", "list", "packages"]
+    )
+
+
+def test_list_packages_can_filter_system_apps(client):
+    with patch.object(client, "_run", return_value=Mock(stdout="")) as run:
+        client.list_packages(include_system=False)
+    run.assert_called_once_with(
+        ["-s", "192.168.1.25:5555", "shell", "pm", "list", "packages", "-3"]
+    )
+
+
+def test_launch_package_uses_monkey_launcher(client):
+    with patch.object(client, "_run", return_value=Mock(stdout="Events injected: 1")) as run:
+        assert client.launch_package("com.netflix.ninja") == "Events injected: 1"
+    run.assert_called_once_with(
+        ["-s", "192.168.1.25:5555", "shell", "monkey", "-p", "com.netflix.ninja", "1"]
+    )
+
+
+def test_launch_package_force_stops_before_launch(client):
+    with patch.object(
+        client,
+        "_run",
+        side_effect=[Mock(stdout=""), Mock(stdout="Events injected: 1")],
+    ) as run:
+        client.launch_package("com.netflix.ninja", force_stop_first=True)
+
+    assert [call.args[0] for call in run.call_args_list] == [
+        ["-s", "192.168.1.25:5555", "shell", "am", "force-stop", "com.netflix.ninja"],
+        ["-s", "192.168.1.25:5555", "shell", "monkey", "-p", "com.netflix.ninja", "1"],
+    ]
+
+
+def test_launch_package_force_stop_option_must_be_boolean(client):
+    from firestick_controller.adb_client import AdbError
+
+    with pytest.raises(AdbError, match="must be a boolean"):
+        client.launch_package("com.netflix.ninja", force_stop_first="yes")
+
+
+@pytest.mark.parametrize("package_name", ["bad package", "com.example;reboot", "not-a-package"])
+def test_launch_package_rejects_invalid_package_name(client, package_name):
+    from firestick_controller.adb_client import AdbError
+
+    with pytest.raises(AdbError, match="package name is invalid"):
+        client.launch_package(package_name)
+
+
+def test_launch_package_reports_package_without_launchable_activity(client):
+    with patch.object(
+        client,
+        "_run",
+        return_value=Mock(stdout="No activities found to run, monkey aborted."),
+    ):
+        with pytest.raises(AdbCommandError, match="No launchable activity"):
+            client.launch_package("com.example.app")

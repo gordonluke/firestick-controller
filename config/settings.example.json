@@ -4,5 +4,8 @@
     "port": 5555,
     "pairing_port": null,
     "timeout_seconds": 5
-  }
+  },
+  "favorites": [],
+  "application_names": {},
+  "automations": []
 }

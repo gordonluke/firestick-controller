@@ -5,7 +5,10 @@ from __future__ import annotations
 import ipaddress
 import json
 import math
-from dataclasses import dataclass
+import os
+import re
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +50,16 @@ class AppConfig:
     """Application settings loaded from JSON."""
 
     device: DeviceConfig
+    favorites: tuple[str, ...] = ()
+    application_names: dict[str, str] = field(default_factory=dict)
+
+
+_PACKAGE_NAME = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\Z")
+
+
+def is_valid_package_name(package_name: str) -> bool:
+    """Return whether a string is safe and shaped like an Android package ID."""
+    return isinstance(package_name, str) and _PACKAGE_NAME.fullmatch(package_name) is not None
 
 
 def _validate_port(name: str, port: int) -> None:
@@ -79,11 +92,113 @@ def load_config(path: str | Path) -> AppConfig:
     timeout_seconds = device.get("timeout_seconds", 5.0)
     if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool):
         raise ConfigError("device.timeout_seconds must be a number")
+    favorites = data.get("favorites", [])
+    if not isinstance(favorites, list) or any(
+        not is_valid_package_name(package_name) for package_name in favorites
+    ):
+        raise ConfigError("favorites must be a list of valid Android package names")
+    if len(set(favorites)) != len(favorites):
+        raise ConfigError("favorites must not contain duplicate package names")
+    application_names = data.get("application_names", {})
+    if not isinstance(application_names, dict) or any(
+        not is_valid_package_name(package_name)
+        or not isinstance(display_name, str)
+        or not display_name.strip()
+        for package_name, display_name in application_names.items()
+    ):
+        raise ConfigError("application_names must map package names to non-empty display names")
     return AppConfig(
         device=DeviceConfig(
             host=host,
             port=port,
             pairing_port=pairing_port,
             timeout_seconds=float(timeout_seconds),
-        )
+        ),
+        favorites=tuple(favorites),
+        application_names=application_names,
     )
+
+
+def save_app_preferences(
+    path: str | Path,
+    favorites: tuple[str, ...],
+    application_names: dict[str, str] | None = None,
+) -> None:
+    """Atomically save app favorites and optional display-name overrides."""
+    config_path = Path(path)
+    try:
+        data: Any = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"Cannot update configuration file {config_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("Configuration must contain a JSON object")
+    if any(not is_valid_package_name(package_name) for package_name in favorites):
+        raise ConfigError("favorites must contain valid Android package names")
+
+    data["favorites"] = list(favorites)
+    if application_names is not None:
+        data["application_names"] = application_names
+
+    _write_json_atomically(config_path, data)
+
+
+def save_config(path: str | Path, config: AppConfig) -> None:
+    """Persist device connection details and app preferences as JSON."""
+    config_path = Path(path)
+    try:
+        data: Any = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"Cannot update configuration file {config_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("Configuration must contain a JSON object")
+
+    device_settings = data.get("device", {})
+    if not isinstance(device_settings, dict):
+        device_settings = {}
+    device_settings.update(
+        {
+            "host": config.device.host,
+            "port": config.device.port,
+            "pairing_port": config.device.pairing_port,
+            "timeout_seconds": config.device.timeout_seconds,
+        }
+    )
+    data["device"] = device_settings
+    data["favorites"] = list(config.favorites)
+    data["application_names"] = config.application_names
+    _write_json_atomically(
+        config_path,
+        data,
+    )
+
+
+def save_automation_data(path: str | Path, automations: list[dict[str, Any]]) -> None:
+    """Update automation data without replacing other user configuration."""
+    config_path = Path(path)
+    try:
+        data: Any = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"Cannot update configuration file {config_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("Configuration must contain a JSON object")
+    data["automations"] = automations
+    _write_json_atomically(config_path, data)
+
+
+def _write_json_atomically(config_path: Path, data: dict[str, Any]) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=config_path.parent, delete=False
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(data, temporary_file, indent=2)
+            temporary_file.write("\n")
+        os.replace(temporary_path, config_path)
+    except OSError as exc:
+        raise ConfigError(f"Cannot update configuration file {config_path}: {exc}") from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
